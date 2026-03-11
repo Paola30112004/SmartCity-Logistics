@@ -19,18 +19,29 @@ NUM_POINTS = 5  # Número de puntos a generar aleatoriamente
 
 # Configuración de apariencia
 MAP_STYLE = "mapbox://styles/mapbox/navigation-night-v1"
-BUILDING_COLOR = "[30, 255, 200, 80]" # Cian neón translúcido
-PATH_COLOR = "[255, 140, 0, 255]"     # Naranja brillante continuo
-POINT_COLOR = "[255, 20, 147, 255]"   # Rosa neón vibrante
+BUILDING_COLOR = "[70, 180, 255, 180]"  # Azul celeste holográfico brillante
+PATH_COLOR = "[255, 60, 0, 255]"      # Naranja/Rojo Neón ("Cable Caliente")
+POINT_COLOR = "[0, 255, 128, 255]"    # Verde Esmeralda/Cyan brillante
 
 # Modelos de Vehículos (Simulación Física Logística)
 VEHICLES = {
-    "🚗 Sedán Económico": {"speed_kmh": 50, "efficiency_kml": 15, "anim_delay": 0.03},
-    "🚙 Camioneta SUV": {"speed_kmh": 45, "efficiency_kml": 10, "anim_delay": 0.05},
-    "🚐 Furgoneta de Carga": {"speed_kmh": 40, "efficiency_kml": 8, "anim_delay": 0.08},
-    "🚚 Camión Ligero": {"speed_kmh": 35, "efficiency_kml": 6, "anim_delay": 0.12},
-    "🚛 Camión Pesado": {"speed_kmh": 30, "efficiency_kml": 4, "anim_delay": 0.18}
+    "🚗 Sedán Económico": {"speed_kmh": 50, "efficiency_kml": 15, "emoji": "🚗"},
+    "🚙 Camioneta SUV": {"speed_kmh": 45, "efficiency_kml": 10, "emoji": "🚙"},
+    "🚐 Furgoneta de Carga": {"speed_kmh": 40, "efficiency_kml": 8, "emoji": "🚐"},
+    "🚚 Camión Ligero": {"speed_kmh": 35, "efficiency_kml": 6, "emoji": "🚚"},
+    "🚛 Camión Pesado": {"speed_kmh": 30, "efficiency_kml": 4, "emoji": "🚛"}
 }
+
+def haversine_dist_meters(lon1, lat1, lon2, lat2):
+    """Calcula distancia entre 2 puntos en metros para el simulador visual"""
+    R = 6371000
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    delta_phi = np.radians(lat2 - lat1)
+    delta_lambda = np.radians(lon2 - lon1)
+    a = np.sin(delta_phi / 2.0)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(delta_lambda / 2.0)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    return R * c
 
 @st.cache_data
 def fetch_street_network(lat, lon, radius=800):
@@ -157,40 +168,40 @@ def generate_pdf_report(vehicle_name, vehicle_data, km, mins, liters, route_sequ
     """Genera un archivo PDF binario en memoria con el reporte logístico"""
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=16, style='B')
-    pdf.cell(200, 10, txt="Reporte de Optimizacion Logistica (SmartCity)", ln=True, align='C')
+    pdf.set_font("helvetica", size=16, style='B')
+    pdf.cell(200, 10, text="Reporte de Optimizacion Logistica (SmartCity)", new_x="LMARGIN", new_y="NEXT", align='C')
     pdf.ln(10)
     
-    pdf.set_font("Arial", size=12, style='B')
-    pdf.cell(200, 10, txt="1. Detalles de la Flota Vehicular", ln=True)
-    pdf.set_font("Arial", size=11)
-    pdf.cell(200, 8, txt=f"Modelo Seleccionado: {vehicle_name}".encode('latin-1', 'replace').decode('latin-1'), ln=True)
-    pdf.cell(200, 8, txt=f"Velocidad Operimental: {vehicle_data['speed_kmh']} km/h", ln=True)
-    pdf.cell(200, 8, txt=f"Rendimiento de Combustible: {vehicle_data['efficiency_kml']} km/L", ln=True)
+    pdf.set_font("helvetica", size=12, style='B')
+    pdf.cell(200, 10, text="1. Detalles de la Flota Vehicular", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", size=11)
+    pdf.cell(200, 8, text=f"Modelo Seleccionado: {vehicle_name}".encode('latin-1', 'replace').decode('latin-1'), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 8, text=f"Velocidad Operimental: {vehicle_data['speed_kmh']} km/h", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 8, text=f"Rendimiento de Combustible: {vehicle_data['efficiency_kml']} km/L", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
     
-    pdf.set_font("Arial", size=12, style='B')
-    pdf.cell(200, 10, txt="2. Metricas del Viaje", ln=True)
-    pdf.set_font("Arial", size=11)
-    pdf.cell(200, 8, txt=f"Distancia Total de Ruta: {km:.2f} km", ln=True)
-    pdf.cell(200, 8, txt=f"Tiempo Estimado de Viaje: {mins:.1f} minutos", ln=True)
-    pdf.cell(200, 8, txt=f"Consumo de Combustible Proyectado: {liters:.2f} Litros", ln=True)
+    pdf.set_font("helvetica", size=12, style='B')
+    pdf.cell(200, 10, text="2. Metricas del Viaje", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", size=11)
+    pdf.cell(200, 8, text=f"Distancia Total de Ruta: {km:.2f} km", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 8, text=f"Tiempo Estimado de Viaje: {mins:.1f} minutos", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 8, text=f"Consumo de Combustible Proyectado: {liters:.2f} Litros", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
     
-    pdf.set_font("Arial", size=12, style='B')
-    pdf.cell(200, 10, txt="3. Secuencia de Puntos de Entrega (Coordenadas)", ln=True)
-    pdf.set_font("Arial", size=10)
+    pdf.set_font("helvetica", size=12, style='B')
+    pdf.cell(200, 10, text="3. Secuencia de Puntos de Entrega (Coordenadas)", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("helvetica", size=10)
     
     for idx, (step_name, lat, lon) in enumerate(route_sequence):
         line = f"Paso {idx}: {step_name} -> Lat: {lat:.5f}, Lon: {lon:.5f}"
-        pdf.cell(200, 6, txt=line.encode('latin-1', 'replace').decode('latin-1'), ln=True)
+        pdf.cell(200, 6, text=line.encode('latin-1', 'replace').decode('latin-1'), new_x="LMARGIN", new_y="NEXT")
         
     pdf.ln(10)
-    pdf.set_font("Arial", size=9, style='I')
-    pdf.cell(200, 10, txt="Generado por SmartCity Logistics TSP Auto-Solver", ln=True, align='C')
+    pdf.set_font("helvetica", size=9, style='I')
+    pdf.cell(200, 10, text="Generado por SmartCity Logistics TSP Auto-Solver", new_x="LMARGIN", new_y="NEXT", align='C')
     
     # Retornar como byte string
-    return bytes(pdf.output(dest='S'))
+    return bytes(pdf.output())
 
 with st.spinner("Generando ciudad 3D y red vial..."):
     geojson_data = fetch_building_data(LAT, LON)
@@ -199,10 +210,12 @@ with st.spinner("Generando ciudad 3D y red vial..."):
 layer_buildings = pdk.Layer(
     "GeoJsonLayer",
     geojson_data,
-    opacity=0.4, # Más transparente para que no ahogue las rutas
+    opacity=0.8,
     extruded=True,
-    get_elevation="properties.height * 1.5",
+    wireframe=True,
+    get_elevation="properties.height * 2.5",
     get_fill_color=BUILDING_COLOR,
+    get_line_color=[100, 100, 200, 30],
     pickable=True
 )
 
@@ -265,8 +278,8 @@ view_state = pdk.ViewState(
     latitude=LAT, 
     longitude=LON, 
     zoom=14.5, 
-    pitch=55, 
-    bearing=15 
+    pitch=65, 
+    bearing=30 
 )
 layers_to_render = [layer_buildings]
 chart_placeholder = st.empty()
@@ -283,17 +296,15 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
     })
     
     layer_points = pdk.Layer(
-        "ScatterplotLayer",
+        "ColumnLayer",
         df_points,
         get_position="[lon, lat]",
+        get_elevation=40,    # Torre de 40m
+        elevation_scale=1,
+        radius=15,           # Ancho del poste
         get_fill_color=POINT_COLOR,
-        get_line_color="[255, 255, 255, 255]",
-        stroked=True,
-        get_line_width=3,
-        get_radius=25,
-        radius_min_pixels=5,
-        radius_max_pixels=15,
         pickable=True,
+        auto_highlight=True,
     )
     layers_to_render.append(layer_points)
 
@@ -401,6 +412,13 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
             full_path = df_path["path"].iloc[0]
             anim_path = []
             
+            # Factor visual agresivo para que no sea estrictamente en tiempo real (horas) sino rápida (segundos)
+            SIMULATION_SPEED_FACTOR = 0.005 
+            # velocidad del carro en metros por segundo
+            vehicle_mps = (vehicle["speed_kmh"] * 1000) / 3600.0
+            
+            prev_pt = None
+            
             for pt in full_path:
                 anim_path.append(pt)
                 anim_df = pd.DataFrame({"path": [anim_path]})
@@ -416,13 +434,46 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
                     line_cap_rounded=True
                 )
                 
+                # Capa Vehicular (Emoji Tracker)
+                # pt es [lon, lat]
+                car_df = pd.DataFrame({
+                    "lon": [pt[0]],
+                    "lat": [pt[1]],
+                    "icon": [vehicle["emoji"]]
+                })
+                car_layer = pdk.Layer(
+                    "TextLayer",
+                    car_df,
+                    get_position="[lon, lat]",
+                    get_text="icon",
+                    get_size=40,
+                    get_color="[255, 255, 255, 255]",
+                    get_alignment_baseline="'center'",
+                )
+
                 # Renderizar cuadro
                 chart_placeholder.pydeck_chart(pdk.Deck(
-                    layers=[layer_buildings, layer_points, anim_layer],
+                    layers=[layer_buildings, layer_points, anim_layer, car_layer],
                     initial_view_state=view_state,
-                    map_style=MAP_STYLE
+                    map_style=MAP_STYLE,
+                    views=[pdk.View(type="MapView", controller=True)]
                 ))
-                time.sleep(vehicle["anim_delay"]) # El retraso simula la velocidad pesada o liviana
+                
+                # Dinámica de tiempo simulado fiel al tramo
+                if prev_pt is not None:
+                    dist_metros = haversine_dist_meters(prev_pt[0], prev_pt[1], pt[0], pt[1])
+                    if dist_metros > 0:
+                        # Tiempo = Distancia / Velocidad. Luego lo multiplicamos por el factor escalable visual.
+                        real_delay_seconds = (dist_metros / vehicle_mps) * SIMULATION_SPEED_FACTOR
+                        # Evitar locks infinitos de ser muy pequeña la dist
+                        delay = max(0.01, min(real_delay_seconds, 1.0))
+                    else:
+                        delay = 0.01
+                else:
+                    delay = 0.5 # Pausa visual estática inicial antes de partir
+                    
+                time.sleep(delay)
+                prev_pt = pt
             
             st.sidebar.success("Vehículo llegó a su destino.")
 

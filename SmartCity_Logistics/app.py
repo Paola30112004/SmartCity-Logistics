@@ -6,6 +6,7 @@ import time
 import numpy as np
 import pandas as pd
 import networkx as nx
+from fpdf import FPDF
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
@@ -21,6 +22,15 @@ MAP_STYLE = "mapbox://styles/mapbox/navigation-night-v1"
 BUILDING_COLOR = "[30, 255, 200, 80]" # Cian neón translúcido
 PATH_COLOR = "[255, 140, 0, 255]"     # Naranja brillante continuo
 POINT_COLOR = "[255, 20, 147, 255]"   # Rosa neón vibrante
+
+# Modelos de Vehículos (Simulación Física Logística)
+VEHICLES = {
+    "🚗 Sedán Económico": {"speed_kmh": 50, "efficiency_kml": 15, "anim_delay": 0.03},
+    "🚙 Camioneta SUV": {"speed_kmh": 45, "efficiency_kml": 10, "anim_delay": 0.05},
+    "🚐 Furgoneta de Carga": {"speed_kmh": 40, "efficiency_kml": 8, "anim_delay": 0.08},
+    "🚚 Camión Ligero": {"speed_kmh": 35, "efficiency_kml": 6, "anim_delay": 0.12},
+    "🚛 Camión Pesado": {"speed_kmh": 30, "efficiency_kml": 4, "anim_delay": 0.18}
+}
 
 @st.cache_data
 def fetch_street_network(lat, lon, radius=800):
@@ -143,6 +153,45 @@ def fetch_building_data(lat, lon, radius=800):
     
     return json.loads(gdf.to_json())
 
+def generate_pdf_report(vehicle_name, vehicle_data, km, mins, liters, route_sequence):
+    """Genera un archivo PDF binario en memoria con el reporte logístico"""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=16, style='B')
+    pdf.cell(200, 10, txt="Reporte de Optimizacion Logistica (SmartCity)", ln=True, align='C')
+    pdf.ln(10)
+    
+    pdf.set_font("Arial", size=12, style='B')
+    pdf.cell(200, 10, txt="1. Detalles de la Flota Vehicular", ln=True)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(200, 8, txt=f"Modelo Seleccionado: {vehicle_name}".encode('latin-1', 'replace').decode('latin-1'), ln=True)
+    pdf.cell(200, 8, txt=f"Velocidad Operimental: {vehicle_data['speed_kmh']} km/h", ln=True)
+    pdf.cell(200, 8, txt=f"Rendimiento de Combustible: {vehicle_data['efficiency_kml']} km/L", ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", size=12, style='B')
+    pdf.cell(200, 10, txt="2. Metricas del Viaje", ln=True)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(200, 8, txt=f"Distancia Total de Ruta: {km:.2f} km", ln=True)
+    pdf.cell(200, 8, txt=f"Tiempo Estimado de Viaje: {mins:.1f} minutos", ln=True)
+    pdf.cell(200, 8, txt=f"Consumo de Combustible Proyectado: {liters:.2f} Litros", ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", size=12, style='B')
+    pdf.cell(200, 10, txt="3. Secuencia de Puntos de Entrega (Coordenadas)", ln=True)
+    pdf.set_font("Arial", size=10)
+    
+    for idx, (step_name, lat, lon) in enumerate(route_sequence):
+        line = f"Paso {idx}: {step_name} -> Lat: {lat:.5f}, Lon: {lon:.5f}"
+        pdf.cell(200, 6, txt=line.encode('latin-1', 'replace').decode('latin-1'), ln=True)
+        
+    pdf.ln(10)
+    pdf.set_font("Arial", size=9, style='I')
+    pdf.cell(200, 10, txt="Generado por SmartCity Logistics TSP Auto-Solver", ln=True, align='C')
+    
+    # Retornar como byte string
+    return bytes(pdf.output(dest='S'))
+
 with st.spinner("Generando ciudad 3D y red vial..."):
     geojson_data = fetch_building_data(LAT, LON)
     G = fetch_street_network(LAT, LON)
@@ -158,6 +207,13 @@ layer_buildings = pdk.Layer(
 )
 
 st.sidebar.header("Planificador Logístico - TSP")
+
+# Selección de Flota Vehicular
+selected_vehicle_name = st.sidebar.selectbox("Seleccione el Vehículo:", list(VEHICLES.keys()), index=2)
+vehicle = VEHICLES[selected_vehicle_name]
+
+# UI de Configuración
+st.sidebar.markdown("---")
 input_mode = st.sidebar.radio("Modo de Coordenadas:", ["Aleatorias", "Personalizadas"])
 
 coords = None
@@ -258,26 +314,70 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
         optimal_route = st.session_state['optimal_route']
         total_dist_m = st.session_state['total_distance']
         
-        # MÉTRICAS
-        st.sidebar.subheader("Resultados:")
+        # MÉTRICAS Y SIMULACIÓN FÍSICA
+        st.sidebar.subheader("Dinámica del Vehículo:")
         km = total_dist_m / 1000.0
-        # Velocidad estimada 40 km/h en urbano = 40/60 km por min
-        mins = (km / 40.0) * 60.0
+        
+        # Simulaciones dadas por el vehículo seleccionado
+        mins = (km / vehicle["speed_kmh"]) * 60.0
+        liters = km / vehicle["efficiency_kml"]
         
         col1, col2 = st.sidebar.columns(2)
-        col1.metric("Distancia", f"{km:.2f} km")
+        col1.metric("Distancia Total", f"{km:.2f} km")
         col2.metric("Tiempo Aprox.", f"{mins:.1f} min")
         
-        # Orden de Paradas
+        col3, col4 = st.sidebar.columns(2)
+        col3.metric("Velocidad Base", f"{vehicle['speed_kmh']} km/h")
+        col4.metric("Combustible", f"{liters:.2f} L")
+        
+        # Orden de Paradas y Captura para Reportes
+        route_sequence_data = [] # Para el PDF
+        csv_data = []            # Para el CSV
+        
         with st.sidebar.expander("Secuencia de Visita (Coords)", expanded=False):
             st.write(f"Orden Lógico: {' -> '.join(map(str, optimal_route))}")
             for step, idx in enumerate(optimal_route):
+                lat, lon = coords[idx][0], coords[idx][1]
                 if step == 0:
-                    st.write(f"**Origen:** {coords[idx][0]:.5f}, {coords[idx][1]:.5f}")
+                    name = "Origen"
+                    st.write(f"**Origen:** {lat:.5f}, {lon:.5f}")
                 elif step == len(optimal_route) - 1:
-                    st.write(f"**Destino (Retorno):** {coords[idx][0]:.5f}, {coords[idx][1]:.5f}")
+                    name = "Destino Final (Retorno)"
+                    st.write(f"**{name}:** {lat:.5f}, {lon:.5f}")
                 else:
-                    st.write(f"{step}. Parada {idx}: {coords[idx][0]:.5f}, {coords[idx][1]:.5f}")
+                    name = f"Parada {idx}"
+                    st.write(f"{step}. {name}: {lat:.5f}, {lon:.5f}")
+                
+                route_sequence_data.append((name, lat, lon))
+                csv_data.append({"Paso": step, "Nombre": name, "Latitud": lat, "Longitud": lon})
+
+        # --- SECCIÓN DE EXPORTACIÓN ---
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("📥 Exportar Datos de Ruta")
+        
+        # Generar CSV en memoria
+        df_csv = pd.DataFrame(csv_data)
+        csv_bytes = df_csv.to_csv(index=False).encode('utf-8')
+        
+        # Generar PDF en memoria
+        pdf_bytes = generate_pdf_report(selected_vehicle_name, vehicle, km, mins, liters, route_sequence_data)
+        
+        col_dl1, col_dl2 = st.sidebar.columns(2)
+        with col_dl1:
+            st.download_button(
+                label="📄 Reporte PDF",
+                data=pdf_bytes,
+                file_name="reporte_ruta_logistica.pdf",
+                mime="application/pdf"
+            )
+        with col_dl2:
+            st.download_button(
+                label="📊 Coordenadas CSV",
+                data=csv_bytes,
+                file_name="coordenadas_ruta.csv",
+                mime="text/csv"
+            )
+        st.sidebar.markdown("---")
 
         # Geometría Fija
         df_path = construct_full_geometry(G, nodes, optimal_route)
@@ -297,7 +397,7 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
         
         # ANIMACIÓN
         if st.sidebar.button("🚗 Empezar Animación"):
-            # En vez de dibujar toda la línea, la revelamos nodo por nodo de forma animada
+            # Revelamos nodo por nodo respetando fisicas del carro
             full_path = df_path["path"].iloc[0]
             anim_path = []
             
@@ -322,10 +422,9 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
                     initial_view_state=view_state,
                     map_style=MAP_STYLE
                 ))
-                time.sleep(0.05) # Velocidad del coche
+                time.sleep(vehicle["anim_delay"]) # El retraso simula la velocidad pesada o liviana
             
-            # Dejar renderizado en su color normal terminado
-            st.sidebar.success("Animación Finalizada")
+            st.sidebar.success("Vehículo llegó a su destino.")
 
 
 # Render estático predeterminado

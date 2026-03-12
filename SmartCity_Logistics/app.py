@@ -17,12 +17,17 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'venv'))
 # Importar el nuevo VRP Solver
 from tsp_solver import solve_vrp
 
+# --- OPTIMIZACIÓN: Configuración de Caché Persistente ---
+ox.settings.use_cache = True
+ox.settings.cache_folder = "./osmnx_cache"
+
 st.set_page_config(page_title="Smart City Logistics 3D", layout="wide")
 st.title("Optimización de Rutas - Entorno Semi-3D")
 
-# Coordenadas de Alta Vista, Ciudad Guayana
+# Coordenadas Centrales
 LAT, LON = 8.2986, -62.7232
-NUM_POINTS = 5  # Número de puntos a generar aleatoriamente
+NUM_POINTS = 5
+MAP_RADIUS = 1500  # Radio del mapa en metros
 
 # Configuración de apariencia
 MAP_STYLE = "mapbox://styles/mapbox/navigation-night-v1"
@@ -36,7 +41,7 @@ FLEET_TYPES = {
         "capacity_kg": 18000, 
         "speed_kmh": 30, 
         "efficiency_kml": 3, 
-        "cost_factor": 3, # Más penalizado por distancia corta
+        "cost_factor": 1.0, # Prioridad Base
         "color": "[0, 80, 255, 255]", # Azul
         "emoji": "🚛"
     },
@@ -44,7 +49,7 @@ FLEET_TYPES = {
         "capacity_kg": 2000, 
         "speed_kmh": 40, 
         "efficiency_kml": 8, 
-        "cost_factor": 2, # Costo Medio
+        "cost_factor": 1.5, # Ligeramente más caro por km
         "color": "[255, 0, 255, 255]", # Magenta
         "emoji": "🚚"
     },
@@ -52,7 +57,7 @@ FLEET_TYPES = {
         "capacity_kg": 400, 
         "speed_kmh": 25, 
         "efficiency_kml": 25, 
-        "cost_factor": 1, # El más barato para el algoritmo
+        "cost_factor": 2.0, # Más caro por km (para forzar su uso solo en paradas necesarias)
         "color": "[0, 255, 128, 255]", # Verde
         "emoji": "🛵"
     }
@@ -70,8 +75,33 @@ def haversine_dist_meters(lon1, lat1, lon2, lat2):
     return R * c
 
 @st.cache_data
-def fetch_street_network(lat, lon, radius=800):
+def fetch_street_network(lat, lon, radius=MAP_RADIUS):
     return ox.graph_from_point((lat, lon), dist=radius, network_type='drive')
+
+@st.cache_data
+def get_address_from_graph(_G, lat, lon):
+    """Obtiene el nombre de la calle más cercana directamente del grafo OSM"""
+    try:
+        # Encontrar la arista (calle) más cercana
+        nearest_edge = ox.distance.nearest_edges(_G, X=lon, Y=lat)
+        # nearest_edge es (u, v, key)
+        edge_data = _G.get_edge_data(nearest_edge[0], nearest_edge[1], nearest_edge[2])
+        street_name = edge_data.get('name', 'Calle sin nombre')
+        if isinstance(street_name, list):
+            street_name = " / ".join(str(s) for s in street_name)
+        return str(street_name)
+    except:
+        return f"Vía de Alta Vista (Lat: {lat:.4f})"
+
+@st.cache_data
+def get_street_geometry(_G):
+    """Convierte la red vial en líneas dibujables para el mapa"""
+    gdf_edges = ox.graph_to_gdfs(_G, nodes=False, edges=True)
+    paths = []
+    for _, row in gdf_edges.iterrows():
+        if hasattr(row.geometry, 'coords'):
+            paths.append({"path": list(row.geometry.coords)})
+    return pd.DataFrame(paths)
 
 def generate_and_snap_points(G, center_lat, center_lon, num_points=5, radius_deg=0.01):
     """Genera coordenadas aleatorias y las acopla al nodo de red más cercano"""
@@ -148,10 +178,16 @@ def construct_full_geometry(G, nodes, optimal_route_indices):
     return pd.DataFrame({"path": [full_path_coords]})
 
 @st.cache_data
-def fetch_building_data(lat, lon, radius=800):
+def fetch_building_data(lat, lon, radius=MAP_RADIUS):
     tags = {"building": True}
     gdf = ox.features_from_point((lat, lon), tags=tags, dist=radius)
-    gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+    
+    # Filtrar solo polígonos para evitar errores en la simplificación
+    gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
+    
+    # OPTIMIZACIÓN: Simplificar geometrías para que el mapa pese menos y vuele
+    # El valor 0.00005 es un buen balance entre detalle y peso
+    gdf['geometry'] = gdf.geometry.simplify(tolerance=0.00005, preserve_topology=True)
     
     # CORRECCIÓN DEL ERROR DE LA IMAGEN:
     alturas_random = pd.Series(np.random.randint(10, 45, size=len(gdf)), index=gdf.index)
@@ -159,7 +195,7 @@ def fetch_building_data(lat, lon, radius=800):
     
     return json.loads(gdf.to_json())
 
-def generate_pdf_report(vehicle_name, vehicle_data, km, mins, liters, route_sequence):
+def generate_pdf_report(vehicle_name, vehicle_data, km_total, mins_total, liters_total, route_sequence, cost_total=0):
     """Genera un archivo PDF binario en memoria con el reporte logístico"""
     pdf = FPDF()
     pdf.add_page()
@@ -168,39 +204,54 @@ def generate_pdf_report(vehicle_name, vehicle_data, km, mins, liters, route_sequ
     pdf.ln(10)
     
     pdf.set_font("helvetica", size=12, style='B')
-    pdf.cell(200, 10, text="1. Detalles de la Flota Vehicular", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 10, text="1. Resumen de Flota Vehicular Desplegada", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", size=11)
-    pdf.cell(200, 8, text=f"Modelo Seleccionado: {vehicle_name}".encode('latin-1', 'replace').decode('latin-1'), new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(200, 8, text=f"Velocidad Operimental: {vehicle_data['speed_kmh']} km/h", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(200, 8, text=f"Rendimiento de Combustible: {vehicle_data['efficiency_kml']} km/L", new_x="LMARGIN", new_y="NEXT")
+    
+    # Adaptar para reporte VRP o TSP
+    if vehicle_name != "Flota Heterogénea":
+        pdf.cell(200, 8, text=f"Modelo Seleccionado: {vehicle_name}".encode('latin-1', 'replace').decode('latin-1'), new_x="LMARGIN", new_y="NEXT")
+    else:
+        pdf.cell(200, 8, text="Operacion: Multi-Vehiculo (CVRP)", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
     
     pdf.set_font("helvetica", size=12, style='B')
-    pdf.cell(200, 10, text="2. Metricas del Viaje", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 10, text="2. Metricas Globales del Viaje", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", size=11)
-    pdf.cell(200, 8, text=f"Distancia Total de Ruta: {km:.2f} km", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(200, 8, text=f"Tiempo Estimado de Viaje: {mins:.1f} minutos", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(200, 8, text=f"Consumo de Combustible Proyectado: {liters:.2f} Litros", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 8, text=f"Distancia Total de Ruta(s): {km_total:.2f} km", new_x="LMARGIN", new_y="NEXT")
+    if mins_total > 0:
+        pdf.cell(200, 8, text=f"Tiempo Estimado de Viaje (Mas largo): {mins_total:.1f} minutos", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 8, text=f"Consumo de Combustible Proyectado: {liters_total:.2f} Litros", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 8, text=f"Costo Total de Operacion: ${cost_total:.2f} USD", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
     
     pdf.set_font("helvetica", size=12, style='B')
-    pdf.cell(200, 10, text="3. Secuencia de Puntos de Entrega (Coordenadas)", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(200, 10, text="3. Rutas y Puntos de Entrega (Coordenadas)", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", size=10)
     
     for idx, (step_name, lat, lon) in enumerate(route_sequence):
-        line = f"Paso {idx}: {step_name} -> Lat: {lat:.5f}, Lon: {lon:.5f}"
+        line = f"{step_name} -> Lat: {lat:.5f}, Lon: {lon:.5f}"
         pdf.cell(200, 6, text=line.encode('latin-1', 'replace').decode('latin-1'), new_x="LMARGIN", new_y="NEXT")
         
     pdf.ln(10)
     pdf.set_font("helvetica", size=9, style='I')
-    pdf.cell(200, 10, text="Generado por SmartCity Logistics TSP Auto-Solver", new_x="LMARGIN", new_y="NEXT", align='C')
+    pdf.cell(200, 10, text="Generado por SmartCity Logistics TSP/VRP Auto-Solver", new_x="LMARGIN", new_y="NEXT", align='C')
     
     # Retornar como byte string
     return bytes(pdf.output())
 
-with st.spinner("Generando ciudad 3D y red vial..."):
+with st.spinner("Generando ciudad y red vial interactiva..."):
     geojson_data = fetch_building_data(LAT, LON)
     G = fetch_street_network(LAT, LON)
+    df_streets = get_street_geometry(G)
+
+layer_streets = pdk.Layer(
+    "PathLayer",
+    df_streets,
+    width_min_pixels=2,
+    get_color=[255, 255, 255, 60], # Blanco más sutil para la noche
+    get_path="path",
+    pickable=False
+)
 
 layer_buildings = pdk.Layer(
     "GeoJsonLayer",
@@ -232,7 +283,7 @@ coords = None
 nodes = None
 
 if input_mode == "Aleatorias":
-    num_pts = st.sidebar.slider("Nº de Puntos:", min_value=3, max_value=15, value=NUM_POINTS)
+    num_pts = st.sidebar.slider("Nº de Puntos:", min_value=3, max_value=25, value=NUM_POINTS)
     if st.sidebar.button("Generar Coordenadas"):
         nodes, coords = generate_and_snap_points(G, LAT, LON, num_pts)
         st.session_state['nodes'] = nodes
@@ -240,7 +291,7 @@ if input_mode == "Aleatorias":
         st.session_state['solved'] = False
 
 elif input_mode == "Personalizadas":
-    st.sidebar.write("Edita la tabla. Máximo 10 paradas.")
+    st.sidebar.write("Edita la tabla. Máximo 20 paradas.")
     # Datos base para el editor si no existen en estado
     if 'custom_df' not in st.session_state:
         # Se añaden 3 puntos cercanos iniciales de ejemplo
@@ -254,8 +305,8 @@ elif input_mode == "Personalizadas":
 
     if st.sidebar.button("Fijar Coordenadas"):
         valid_df = edited_df.dropna()
-        if len(valid_df) > 10:
-            st.sidebar.error("Máximo 10 coordenadas permitidas para evitar sobrecarga del solver de demo.")
+        if len(valid_df) > 20:
+            st.sidebar.error("Máximo 20 coordenadas permitidas para evitar sobrecarga del solver de demo.")
         elif len(valid_df) < 2:
             st.sidebar.warning("Introduce al menos 2 coordenadas.")
         else:
@@ -280,7 +331,7 @@ view_state = pdk.ViewState(
     pitch=65, 
     bearing=30 
 )
-layers_to_render = [layer_buildings]
+layers_to_render = [layer_streets, layer_buildings]
 chart_placeholder = st.empty()
 
 
@@ -288,19 +339,23 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
     nodes = st.session_state['nodes']
     coords = st.session_state['coords']
     
+    # Obtener nombres de calles reales usando el grafo G
+    addresses = [get_address_from_graph(G, c[0], c[1]) for c in coords]
+    
     df_points = pd.DataFrame({
         "lon": coords[:, 1],
         "lat": coords[:, 0],
-        "index": ["Depot (Origen)"] + [f"Parada {i}" for i in range(1, len(coords))]
+        "direccion": addresses,
+        "index": ["Base Logística (Vertedero)"] + [f"Parada {i}" for i in range(1, len(coords))]
     })
     
     layer_points = pdk.Layer(
         "ColumnLayer",
         df_points,
         get_position="[lon, lat]",
-        get_elevation=40,    # Torre de 40m
+        get_elevation=60,    # Torre más visible
         elevation_scale=1,
-        radius=15,           # Ancho del poste
+        radius=20,           # Un poco más robusto
         get_fill_color=POINT_COLOR,
         pickable=True,
         auto_highlight=True,
@@ -309,8 +364,22 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
 
     st.sidebar.markdown("---")
     if st.sidebar.button("Calcular Rutas de Flota", type="primary"):
+        # OPTIMIZACIÓN: Solo recalcular la matriz si los puntos han cambiado
+        current_nodes_hash = hash(tuple(nodes))
+        prev_nodes_hash = st.session_state.get('last_nodes_hash')
+        
+        # Limpiar resultados anteriores para evitar confusión
+        if 'optimal_routes' in st.session_state: del st.session_state['optimal_routes']
+        if 'active_vehicles' in st.session_state: del st.session_state['active_vehicles']
+        st.session_state['solved'] = False
+        
         with st.spinner("Despachando unidades y calculando rutas VRP..."):
-            dist_matrix = network_distance_matrix(G, nodes)
+            if current_nodes_hash == prev_nodes_hash and 'dist_matrix' in st.session_state:
+                dist_matrix = st.session_state['dist_matrix']
+            else:
+                dist_matrix = network_distance_matrix(G, nodes)
+                st.session_state['dist_matrix'] = dist_matrix
+                st.session_state['last_nodes_hash'] = current_nodes_hash
             
             # Preparar demandas aleatorias (simulando basura en kg) para las paradas. Depot = 0.
             demands = [0] + [int(np.random.randint(50, 250)) for _ in range(len(nodes) - 1)]
@@ -326,8 +395,11 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
                     active_costs.append(FLEET_TYPES[v_name]["cost_factor"])
                     active_vehicles_info.append((v_name, FLEET_TYPES[v_name]))
             
+            num_available_pts = len(nodes) - 1
             if len(active_capacities) == 0:
                 st.sidebar.error("⚠️ Debes habilitar al menos un vehículo en la flota.")
+            elif len(active_capacities) > num_available_pts:
+                st.sidebar.error(f"⚠️ Tienes {len(active_capacities)} vehículos pero solo {num_available_pts} paradas. Reduce la flota o aumenta los puntos.")
             else:
                 optimal_routes = solve_vrp(dist_matrix, demands, active_capacities, active_costs, depot_index=0)
                 
@@ -339,6 +411,7 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
                     st.session_state['active_vehicles'] = active_vehicles_info
                     st.session_state['demands'] = demands
                     st.session_state['solved'] = True
+                    st.sidebar.success(f"✓ {sum(1 for r in optimal_routes if len(r)>2)} vehículos en ruta.")
                 else:
                     st.sidebar.error("Inviable: Capacidad insuficiente en la flota o puntos desconectados.")
 
@@ -352,11 +425,18 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
         
         total_fleet_cost_usd = 0
         total_fleet_liters = 0
+        total_fleet_km = 0
+        fleet_total_time_mins = 0
+        max_time_mins = 0
         
         route_sequence_data = [] # Para el PDF
         csv_data = []            # Para el CSV
         
         layers_vrp_paths = []    # Para PyDeck
+        vehicle_animation_data = [] # Para animacion simultanea
+        
+        # Check para nodos no visitados
+        visited_nodes = set([0])
         
         for v_idx, route in enumerate(optimal_routes):
             if not route: continue # El camión no se usó
@@ -372,19 +452,24 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
                 )
             
             km = dist_m / 1000.0
+            total_fleet_km += km
             
             # Simulaciones dadas por el vehículo asignado
-            # Gasto = Distancia / Eficiencia * (Tráfico Random)
-            traffic_factor = np.random.uniform(1.0, 1.3)
+            traffic_factor = np.random.uniform(1.0, 1.2)
             liters = (km / v_data["efficiency_kml"]) * traffic_factor
             cost_usd = liters * 0.5 # $0.5 USD por litro
             
+            # Tiempo del viaje = Distancia / Velocidad
+            mins = (km / v_data["speed_kmh"]) * 60.0
+            fleet_total_time_mins += mins
+            if mins > max_time_mins: max_time_mins = mins
+            
             total_fleet_liters += liters
             total_fleet_cost_usd += cost_usd
-
         
             with st.sidebar.expander(f"{v_data['emoji']} Vehículo {v_idx+1}: {v_name}", expanded=False):
                 st.write(f"**Recorrido:** {km:.2f} km")
+                st.write(f"**Tiempo Est.:** {mins:.1f} min")
                 st.write(f"**Combustible:** {liters:.1f} L (${cost_usd:.2f} USD)")
                 
                 # Carga total recogida
@@ -395,29 +480,52 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
                 
                 # Datos para exportar
                 for step, node_idx in enumerate(route):
+                    visited_nodes.add(node_idx)
                     lat, lon = coords[node_idx][0], coords[node_idx][1]
                     name_point = f"Parada {node_idx} ({demands[node_idx]} kg)" if node_idx != 0 else "Base/Vertedero"
-                    route_sequence_data.append((f"[V{v_idx+1}] " + name_point, lat, lon))
+                    route_sequence_data.append((f"[Vehículo {v_idx+1}] Paso {step}: {name_point}", lat, lon))
                     csv_data.append({"Vehiculo": v_name, "Paso": step, "Nombre": name_point, "Latitud": lat, "Longitud": lon, "Carga_Kg": demands[node_idx]})
 
             # Geometría Fija para este vehículo
             df_path = construct_full_geometry(G, nodes, route)
             if not df_path.empty:
+                # Variar ligeramente el color si hay muchos del mismo tipo para distinguirlos
+                base_color = v_data["color"].replace("[", "").replace("]", "").split(",")
+                r, g, b, a = [int(c) for c in base_color]
+                # Aplicar un pequeño offset aleatorio al color para evitar superposición perfecta visual
+                r = min(255, max(0, r + (v_idx * 20) % 50))
+                g = min(255, max(0, g + (v_idx * 30) % 50))
+                disting_color = f"[{r}, {g}, {b}, {a}]"
+                
                 layer_path = pdk.Layer(
                     "PathLayer",
                     df_path,
                     width_scale=2,
                     width_min_pixels=4,
                     width_max_pixels=8,
-                    get_color=v_data["color"],
+                    get_color=disting_color,
                     get_path="path",
                     pickable=True,
                     line_joint_rounded=True,
                     line_cap_rounded=True
                 )
                 layers_vrp_paths.append(layer_path)
+                
+                # Setup para animacion
+                vehicle_animation_data.append({
+                    "path_coords": df_path["path"].iloc[0],
+                    "emoji": v_data["emoji"],
+                    "color": v_data["color"],
+                    "speed": (v_data["speed_kmh"] * 1000) / 3600.0, # m/s
+                    "current_idx": 0
+                })
 
-        st.sidebar.info(f"**Gasto Total Flota (Gasolina):** ${total_fleet_cost_usd:.2f} USD")
+        st.sidebar.info(f"**Costo Total Gasolina:** ${total_fleet_cost_usd:.2f} USD")
+        st.sidebar.info(f"**Tiempo Operativo Total:** {fleet_total_time_mins:.1f} min")
+        
+        unassigned = set(range(len(nodes))) - visited_nodes
+        if unassigned:
+            st.sidebar.error(f"⚠️ Alerta: No hubo capacidad para: {list(unassigned)}")
 
         # --- SECCIÓN DE EXPORTACIÓN ---
         st.sidebar.markdown("---")
@@ -426,7 +534,7 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
         df_csv = pd.DataFrame(csv_data)
         csv_bytes = df_csv.to_csv(index=False).encode('utf-8')
         
-        pdf_bytes = generate_pdf_report("Flota Heterogénea", {"speed_kmh": "Variable", "efficiency_kml": "Variable"}, 0, 0, total_fleet_liters, route_sequence_data)
+        pdf_bytes = generate_pdf_report("Flota Heterogénea", None, total_fleet_km, fleet_total_time_mins, total_fleet_liters, route_sequence_data, total_fleet_cost_usd)
         
         col_dl1, col_dl2 = st.sidebar.columns(2)
         with col_dl1:
@@ -437,9 +545,65 @@ if 'nodes' in st.session_state and 'coords' in st.session_state:
 
         layers_to_render.extend(layers_vrp_paths)
         
-        # ANIMACIÓN (Pendiente de adaptación multiplata, se deja un placeholder)
-        if st.sidebar.button("🚗 Ver Animación (V1)"):
-            st.sidebar.warning("La animación multi-vehículo simultánea requiere WebGL concurrente avanzado. Se mostrarán solo las pistas estáticas por ahora.")
+        # ANIMACIÓN MULTI-VEHÍCULO
+        if st.sidebar.button("🚗 Empezar Animación de Flota"):
+            SIMULATION_SPEED_FACTOR = 0.05 
+            
+            animating = True
+            while animating:
+                animating = False
+                current_layers = [layer_streets, layer_buildings, layer_points]
+                
+                for v_data in vehicle_animation_data:
+                    idx = v_data["current_idx"]
+                    path_coords = v_data["path_coords"]
+                    
+                    if idx < len(path_coords):
+                        animating = True
+                        pt = path_coords[idx]
+                        
+                        # Trazo recorrido hasta ahora
+                        anim_path = path_coords[:idx+1]
+                        anim_df = pd.DataFrame({"path": [anim_path]})
+                        anim_layer = pdk.Layer(
+                            "PathLayer",
+                            anim_df,
+                            width_scale=2,
+                            width_min_pixels=6,
+                            width_max_pixels=12,
+                            get_color=v_data["color"],
+                            get_path="path",
+                            line_joint_rounded=True,
+                            line_cap_rounded=True
+                        )
+                        current_layers.append(anim_layer)
+                        
+                        # Emoticono de Vehículo
+                        car_df = pd.DataFrame({"lon": [pt[0]], "lat": [pt[1]], "icon": [v_data["emoji"]]})
+                        car_layer = pdk.Layer(
+                            "TextLayer",
+                            car_df,
+                            get_position="[lon, lat]",
+                            get_text="icon",
+                            get_size=40,
+                            get_color="[255, 255, 255, 255]",
+                            get_alignment_baseline="'center'",
+                        )
+                        current_layers.append(car_layer)
+                        
+                        # Adelantar frame (simplificado por frame, ignorando fisicas ultra precisas de colision por ahora)
+                        v_data["current_idx"] += 2
+                        
+                if animating:
+                    chart_placeholder.pydeck_chart(pdk.Deck(
+                        layers=current_layers,
+                        initial_view_state=view_state,
+                        map_style=MAP_STYLE,
+                        views=[pdk.View(type="MapView", controller=True)]
+                    ))
+                    time.sleep(SIMULATION_SPEED_FACTOR)
+            
+            st.sidebar.success("✅ Flota llegó a su destino.")
 
 
 # Render estático predeterminado
@@ -447,5 +611,5 @@ chart_placeholder.pydeck_chart(pdk.Deck(
     layers=layers_to_render, 
     initial_view_state=view_state, 
     map_style=MAP_STYLE,
-    tooltip={"html": "<b>{index}</b>", "style": {"backgroundColor": "steelblue", "color": "white"}}
+    tooltip={"html": "<b>{index}</b><br/>{direccion}", "style": {"backgroundColor": "steelblue", "color": "white"}}
 ))
